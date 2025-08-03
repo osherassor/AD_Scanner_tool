@@ -1,0 +1,1141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AD Recon Security Report - Example</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+            margin-bottom: 20px;
+        }
+
+        .scan-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .info-item {
+            background: rgba(255,255,255,0.1);
+            padding: 15px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+        }
+
+        .info-item strong {
+            display: block;
+            margin-bottom: 5px;
+            color: #3498db;
+        }
+
+        .summary-section {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .summary-item {
+            text-align: center;
+            padding: 20px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border: 2px solid #dee2e6;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .summary-item:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+        }
+
+        .summary-item.high {
+            border-color: #dc3545;
+            background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
+        }
+
+        .summary-item.medium {
+            border-color: #ffc107;
+            background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+        }
+
+        .summary-item.info {
+            border-color: #17a2b8;
+            background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
+        }
+
+        .summary-item.success {
+            border-color: #28a745;
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+        }
+
+        .summary-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .summary-label {
+            font-size: 0.9em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .data-section {
+            background: white;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .section-header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 20px 30px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.3s ease;
+        }
+
+        .section-header:hover {
+            background: linear-gradient(135deg, #34495e 0%, #2c3e50 100%);
+        }
+
+        .section-header h3 {
+            font-size: 1.3em;
+            margin: 0;
+        }
+
+        .section-content {
+            padding: 30px;
+            display: none;
+        }
+
+        .section-content.active {
+            display: block;
+        }
+
+        .search-container {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .search-box {
+            flex: 1;
+            padding: 12px 15px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s ease;
+        }
+
+        .search-box:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+        }
+
+        .search-count {
+            background: #3498db;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .data-table th {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 15px 12px;
+            text-align: left;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+            resize: horizontal;
+            overflow: hidden;
+        }
+
+        .data-table th:hover {
+            background: linear-gradient(135deg, #34495e 0%, #2c3e50 100%);
+        }
+
+        .data-table th::after {
+            content: '↕';
+            position: absolute;
+            right: 8px;
+            opacity: 0.7;
+        }
+
+        .data-table th.sorted-asc::after {
+            content: '↑';
+        }
+
+        .data-table th.sorted-desc::after {
+            content: '↓';
+        }
+
+        .data-table td {
+            padding: 12px;
+            border-bottom: 1px solid #e9ecef;
+            vertical-align: top;
+        }
+
+        .data-table tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        .data-table tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+
+        .data-table tr:nth-child(even):hover {
+            background-color: #e9ecef;
+        }
+
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .status-enabled {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-disabled {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-yes {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-no {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .days-old {
+            font-weight: bold;
+        }
+
+        .days-old.good {
+            color: #28a745;
+        }
+
+        .days-old.warning {
+            color: #ffc107;
+        }
+
+        .days-old.danger {
+            color: #dc3545;
+        }
+
+        .findings-section {
+            background: white;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .finding {
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            overflow: hidden;
+        }
+
+        .finding.high {
+            border-left: 4px solid #dc3545;
+        }
+
+        .finding.medium {
+            border-left: 4px solid #ffc107;
+        }
+
+        .finding.info {
+            border-left: 4px solid #17a2b8;
+        }
+
+        .finding-title {
+            background: #f8f9fa;
+            padding: 15px 20px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .finding-description {
+            padding: 15px 20px;
+            line-height: 1.6;
+        }
+
+        .finding-meta {
+            background: #e9ecef;
+            padding: 10px 20px;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .severity-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .severity-high {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .severity-medium {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .severity-info {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .policy-section {
+            margin: 20px 0;
+        }
+
+        .policy-section h4 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .policy-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .policy-table th {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .policy-table td {
+            padding: 12px;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .policy-table tr.good {
+            background-color: #d4edda;
+            border-left: 4px solid #28a745;
+        }
+
+        .policy-table tr.weak {
+            background-color: #f8d7da;
+            border-left: 4px solid #dc3545;
+        }
+
+        .policy-table tr.neutral {
+            background-color: #f8f9fa;
+            border-left: 4px solid #6c757d;
+        }
+
+        .policy-table tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-style: italic;
+        }
+
+        .subnet-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .subnet-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+
+        .subnet-item strong {
+            color: #2c3e50;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .summary-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .search-container {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .data-table {
+                font-size: 12px;
+            }
+            
+            .data-table th,
+            .data-table td {
+                padding: 8px 6px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🔍 AD Recon Security Report</h1>
+            <div class="subtitle">Comprehensive Active Directory Security Analysis</div>
+            <div class="scan-info">
+                <div class="info-item">
+                    <strong>Domain:</strong>
+                    example.local
+                </div>
+                <div class="info-item">
+                    <strong>Scan Date:</strong>
+                    2024-01-15 14:30:25
+                </div>
+                <div class="info-item">
+                    <strong>Scan Duration:</strong>
+                    2 minutes 45 seconds
+                </div>
+                <div class="info-item">
+                    <strong>Authentication:</strong>
+                    SIMPLE (user@example.local)
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary Section -->
+        <div class="summary-section">
+            <h2>📊 Executive Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-item high">
+                    <div class="summary-number">12</div>
+                    <div class="summary-label">High Risk Findings</div>
+                </div>
+                <div class="summary-item medium">
+                    <div class="summary-number">8</div>
+                    <div class="summary-label">Medium Risk Findings</div>
+                </div>
+                <div class="summary-item info">
+                    <div class="summary-number">5</div>
+                    <div class="summary-label">Info Findings</div>
+                </div>
+                <div class="summary-item success">
+                    <div class="summary-number">1,247</div>
+                    <div class="summary-label">Total Users</div>
+                </div>
+                <div class="summary-item success">
+                    <div class="summary-number">156</div>
+                    <div class="summary-label">Computers</div>
+                </div>
+                <div class="summary-item success">
+                    <div class="summary-number">89</div>
+                    <div class="summary-label">Groups</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Security Findings -->
+        <div class="findings-section">
+            <div class="section-header" onclick="toggleSection('findings')">
+                <h3>🚨 Security Findings & Risk Analysis</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="findings">
+                <!-- High Risk Findings -->
+                <h4 style="color: #dc3545; margin-bottom: 20px;">🔴 HIGH RISK FINDINGS</h4>
+                
+                <div class="finding high">
+                    <div class="finding-title">
+                        <span class="severity-badge severity-high">HIGH</span>
+                        Potential Credentials Found in User Descriptions
+                    </div>
+                    <div class="finding-description">
+                        <strong>Why this is risky:</strong> Passwords stored in user descriptions are easily accessible to any authenticated user and can be used for lateral movement and privilege escalation.<br><br>
+                        <strong>How attackers can exploit this:</strong> Attackers can extract these credentials using LDAP queries and use them to access other systems, escalate privileges, or move laterally through the network.<br><br>
+                        <strong>Found credentials:</strong><br>
+                        • User: admin - Password: Admin123! (in description)<br>
+                        • User: service_account - Password: ServicePass2024! (in description)<br>
+                        • User: backup_user - Password: Backup@2024 (in description)
+                    </div>
+                    <div class="finding-meta">
+                        📁 Category: Credential Exposure | ⏰ Time: 2024-01-15 14:30:25
+                    </div>
+                </div>
+
+                <div class="finding high">
+                    <div class="finding-title">
+                        <span class="severity-badge severity-high">HIGH</span>
+                        Users with Password Not Required
+                    </div>
+                    <div class="finding-description">
+                        <strong>Why this is risky:</strong> Accounts with password not required can be accessed without authentication, providing attackers with immediate access to the domain.<br><br>
+                        <strong>How attackers can exploit this:</strong> Attackers can use tools like Rubeus or Mimikatz to authenticate as these users without providing credentials, gaining immediate access to the domain.<br><br>
+                        <strong>Affected users:</strong><br>
+                        • guest (Built-in account)<br>
+                        • service_legacy (Legacy service account)
+                    </div>
+                    <div class="finding-meta">
+                        📁 Category: Password Security | ⏰ Time: 2024-01-15 14:30:25
+                    </div>
+                </div>
+
+                <!-- Medium Risk Findings -->
+                <h4 style="color: #ffc107; margin: 30px 0 20px 0;">🟡 MEDIUM RISK FINDINGS</h4>
+                
+                <div class="finding medium">
+                    <div class="finding-title">
+                        <span class="severity-badge severity-medium">MEDIUM</span>
+                        Users with Old Passwords (>90 days)
+                    </div>
+                    <div class="finding-description">
+                        <strong>Why this is risky:</strong> Old passwords increase the risk of credential compromise and reduce overall security posture.<br><br>
+                        <strong>How attackers can exploit this:</strong> Old passwords are more likely to have been compromised through various attack vectors and can be used for unauthorized access.<br><br>
+                        <strong>Affected users:</strong><br>
+                        • user1 - Last password change: 156 days ago<br>
+                        • user2 - Last password change: 203 days ago<br>
+                        • user3 - Last password change: 178 days ago
+                    </div>
+                    <div class="finding-meta">
+                        📁 Category: Password Security | ⏰ Time: 2024-01-15 14:30:25
+                    </div>
+                </div>
+
+                <div class="finding medium">
+                    <div class="finding-title">
+                        <span class="severity-badge severity-medium">MEDIUM</span>
+                        Kerberoasting Candidates Found
+                    </div>
+                    <div class="finding-description">
+                        <strong>Why this is risky:</strong> Service accounts with SPNs can be targeted for Kerberoasting attacks to extract service tickets and crack passwords offline.<br><br>
+                        <strong>How attackers can exploit this:</strong> Attackers can request service tickets for these accounts and attempt to crack the passwords offline using tools like Hashcat.<br><br>
+                        <strong>Vulnerable accounts:</strong><br>
+                        • sql_service (MSSQLSvc/db.example.local)<br>
+                        • web_service (HTTP/web.example.local)<br>
+                        • file_service (CIFS/files.example.local)
+                    </div>
+                    <div class="finding-meta">
+                        📁 Category: Kerberoasting | ⏰ Time: 2024-01-15 14:30:25
+                    </div>
+                </div>
+
+                <!-- Info Findings -->
+                <h4 style="color: #17a2b8; margin: 30px 0 20px 0;">🔵 INFO FINDINGS</h4>
+                
+                <div class="finding info">
+                    <div class="finding-title">
+                        <span class="severity-badge severity-info">INFO</span>
+                        Password Policy Analysis
+                    </div>
+                    <div class="finding-description">
+                        <strong>Analysis Results:</strong><br>
+                        • Minimum password length: 8 characters ✅<br>
+                        • Maximum password age: 90 days ✅<br>
+                        • Password history: 5 passwords ✅<br>
+                        • Account lockout threshold: 5 attempts ✅<br>
+                        • Lockout duration: 30 minutes ✅<br><br>
+                        <strong>Overall Assessment:</strong> Password policy follows security best practices with appropriate settings for enterprise environments.
+                    </div>
+                    <div class="finding-meta">
+                        📁 Category: Password Policy | ⏰ Time: 2024-01-15 14:30:25
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- All Users -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('users')">
+                <h3>👥 All Domain Users (1,247 users)</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="users">
+                <div class="search-container">
+                    <input type="text" class="search-box" placeholder="Search users..." onkeyup="searchTable(this, 'usersTable')">
+                    <span class="search-count">Showing 1,247 of 1,247 users</span>
+                </div>
+                <table class="data-table" id="usersTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable(0, 'usersTable')">Username</th>
+                            <th onclick="sortTable(1, 'usersTable')">Display Name</th>
+                            <th onclick="sortTable(2, 'usersTable')">Status</th>
+                            <th onclick="sortTable(3, 'usersTable')">Last Logon</th>
+                            <th onclick="sortTable(4, 'usersTable')">Password Age</th>
+                            <th onclick="sortTable(5, 'usersTable')">Has Password in Desc</th>
+                            <th onclick="sortTable(6, 'usersTable')">Email</th>
+                            <th onclick="sortTable(7, 'usersTable')">Department</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>admin</td>
+                            <td>Administrator</td>
+                            <td><span class="status-badge status-enabled">Enabled</span></td>
+                            <td><span class="days-old good">5 days</span></td>
+                            <td><span class="days-old warning">45 days</span></td>
+                            <td><span class="status-badge status-yes">Yes</span></td>
+                            <td>admin@example.local</td>
+                            <td>IT</td>
+                        </tr>
+                        <tr>
+                            <td>user1</td>
+                            <td>John Doe</td>
+                            <td><span class="status-badge status-enabled">Enabled</span></td>
+                            <td><span class="days-old danger">156 days</span></td>
+                            <td><span class="days-old danger">156 days</span></td>
+                            <td><span class="status-badge status-no">No</span></td>
+                            <td>john.doe@example.local</td>
+                            <td>Sales</td>
+                        </tr>
+                        <tr>
+                            <td>service_account</td>
+                            <td>Service Account</td>
+                            <td><span class="status-badge status-enabled">Enabled</span></td>
+                            <td><span class="days-old warning">67 days</span></td>
+                            <td><span class="days-old warning">89 days</span></td>
+                            <td><span class="status-badge status-yes">Yes</span></td>
+                            <td>service@example.local</td>
+                            <td>IT</td>
+                        </tr>
+                        <tr>
+                            <td>guest</td>
+                            <td>Guest</td>
+                            <td><span class="status-badge status-disabled">Disabled</span></td>
+                            <td><span class="days-old danger">Never</span></td>
+                            <td><span class="days-old danger">Never</span></td>
+                            <td><span class="status-badge status-no">No</span></td>
+                            <td></td>
+                            <td></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Domain Admins -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('admins')">
+                <h3>👑 Domain Administrators (3 users)</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="admins">
+                <div class="search-container">
+                    <input type="text" class="search-box" placeholder="Search domain admins..." onkeyup="searchTable(this, 'adminsTable')">
+                    <span class="search-count">Showing 3 of 3 domain admins</span>
+                </div>
+                <table class="data-table" id="adminsTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable(0, 'adminsTable')">Username</th>
+                            <th onclick="sortTable(1, 'adminsTable')">Display Name</th>
+                            <th onclick="sortTable(2, 'adminsTable')">Status</th>
+                            <th onclick="sortTable(3, 'adminsTable')">Last Logon</th>
+                            <th onclick="sortTable(4, 'adminsTable')">Password Age</th>
+                            <th onclick="sortTable(5, 'adminsTable')">Has Password in Desc</th>
+                            <th onclick="sortTable(6, 'adminsTable')">Email</th>
+                            <th onclick="sortTable(7, 'adminsTable')">Department</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>admin</td>
+                            <td>Administrator</td>
+                            <td><span class="status-badge status-enabled">Enabled</span></td>
+                            <td><span class="days-old good">5 days</span></td>
+                            <td><span class="days-old warning">45 days</span></td>
+                            <td><span class="status-badge status-yes">Yes</span></td>
+                            <td>admin@example.local</td>
+                            <td>IT</td>
+                        </tr>
+                        <tr>
+                            <td>domain_admin</td>
+                            <td>Domain Administrator</td>
+                            <td><span class="status-badge status-enabled">Enabled</span></td>
+                            <td><span class="days-old good">12 days</span></td>
+                            <td><span class="days-old good">23 days</span></td>
+                            <td><span class="status-badge status-no">No</span></td>
+                            <td>domain.admin@example.local</td>
+                            <td>IT</td>
+                        </tr>
+                        <tr>
+                            <td>backup_admin</td>
+                            <td>Backup Administrator</td>
+                            <td><span class="status-badge status-enabled">Enabled</span></td>
+                            <td><span class="days-old warning">67 days</span></td>
+                            <td><span class="days-old danger">156 days</span></td>
+                            <td><span class="status-badge status-yes">Yes</span></td>
+                            <td>backup.admin@example.local</td>
+                            <td>IT</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Computers -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('computers')">
+                <h3>💻 Computers (156 computers)</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="computers">
+                <div class="search-container">
+                    <input type="text" class="search-box" placeholder="Search computers..." onkeyup="searchTable(this, 'computersTable')">
+                    <span class="search-count">Showing 156 of 156 computers</span>
+                </div>
+                <table class="data-table" id="computersTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable(0, 'computersTable')">Computer Name</th>
+                            <th onclick="sortTable(1, 'computersTable')">IP Address</th>
+                            <th onclick="sortTable(2, 'computersTable')">Operating System</th>
+                            <th onclick="sortTable(3, 'computersTable')">OS Version</th>
+                            <th onclick="sortTable(4, 'computersTable')">Managed By</th>
+                            <th onclick="sortTable(5, 'computersTable')">Location</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>DC01</td>
+                            <td>192.168.1.10</td>
+                            <td>Windows Server 2019</td>
+                            <td>10.0.17763</td>
+                            <td>admin</td>
+                            <td>Data Center</td>
+                        </tr>
+                        <tr>
+                            <td>WEB01</td>
+                            <td>192.168.1.20</td>
+                            <td>Windows Server 2019</td>
+                            <td>10.0.17763</td>
+                            <td>admin</td>
+                            <td>DMZ</td>
+                        </tr>
+                        <tr>
+                            <td>SQL01</td>
+                            <td>192.168.1.30</td>
+                            <td>Windows Server 2019</td>
+                            <td>10.0.17763</td>
+                            <td>admin</td>
+                            <td>Data Center</td>
+                        </tr>
+                        <tr>
+                            <td>WORKSTATION01</td>
+                            <td>192.168.1.100</td>
+                            <td>Windows 10 Pro</td>
+                            <td>10.0.19045</td>
+                            <td>user1</td>
+                            <td>Office</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Groups -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('groups')">
+                <h3>👥 All Groups (89 groups)</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="groups">
+                <div class="search-container">
+                    <input type="text" class="search-box" placeholder="Search groups..." onkeyup="searchTable(this, 'groupsTable')">
+                    <span class="search-count">Showing 89 of 89 groups</span>
+                </div>
+                <table class="data-table" id="groupsTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable(0, 'groupsTable')">Group Name</th>
+                            <th onclick="sortTable(1, 'groupsTable')">Display Name</th>
+                            <th onclick="sortTable(2, 'groupsTable')">Group Type</th>
+                            <th onclick="sortTable(3, 'groupsTable')">Member Count</th>
+                            <th onclick="sortTable(4, 'groupsTable')">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Domain Admins</td>
+                            <td>Domain Administrators</td>
+                            <td>Security</td>
+                            <td>3</td>
+                            <td>Designated administrators of the domain</td>
+                        </tr>
+                        <tr>
+                            <td>Enterprise Admins</td>
+                            <td>Enterprise Administrators</td>
+                            <td>Security</td>
+                            <td>1</td>
+                            <td>Enterprise administrators</td>
+                        </tr>
+                        <tr>
+                            <td>IT_Staff</td>
+                            <td>IT Staff</td>
+                            <td>Security</td>
+                            <td>15</td>
+                            <td>IT department staff members</td>
+                        </tr>
+                        <tr>
+                            <td>Sales_Team</td>
+                            <td>Sales Team</td>
+                            <td>Distribution</td>
+                            <td>25</td>
+                            <td>Sales department team members</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Network Subnets -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('subnets')">
+                <h3>🌐 Network Subnets (12 subnets)</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="subnets">
+                <div class="subnet-grid">
+                    <div class="subnet-item">
+                        <strong>192.168.1.0/24</strong>
+                        Main Office Network<br>
+                        <small>45 computers</small>
+                    </div>
+                    <div class="subnet-item">
+                        <strong>192.168.2.0/24</strong>
+                        Branch Office 1<br>
+                        <small>23 computers</small>
+                    </div>
+                    <div class="subnet-item">
+                        <strong>192.168.3.0/24</strong>
+                        Branch Office 2<br>
+                        <small>18 computers</small>
+                    </div>
+                    <div class="subnet-item">
+                        <strong>10.0.1.0/24</strong>
+                        DMZ Network<br>
+                        <small>8 computers</small>
+                    </div>
+                    <div class="subnet-item">
+                        <strong>10.0.2.0/24</strong>
+                        Data Center<br>
+                        <small>12 computers</small>
+                    </div>
+                    <div class="subnet-item">
+                        <strong>172.16.1.0/24</strong>
+                        Development Network<br>
+                        <small>15 computers</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Password Policy -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('policy')">
+                <h3>🔐 Password Policy Analysis</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="policy">
+                <div class="policy-section">
+                    <h4>Domain Password Policy Settings</h4>
+                    <table class="policy-table">
+                        <thead>
+                            <tr>
+                                <th>Setting</th>
+                                <th>Value</th>
+                                <th>Security Assessment</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="good">
+                                <td><strong>Minimum Password Length</strong></td>
+                                <td>8 characters</td>
+                                <td>✅ Good</td>
+                            </tr>
+                            <tr class="good">
+                                <td><strong>Maximum Password Age</strong></td>
+                                <td>90 days</td>
+                                <td>✅ Good</td>
+                            </tr>
+                            <tr class="good">
+                                <td><strong>Minimum Password Age</strong></td>
+                                <td>1 day</td>
+                                <td>✅ Good</td>
+                            </tr>
+                            <tr class="good">
+                                <td><strong>Password History Length</strong></td>
+                                <td>5 passwords</td>
+                                <td>✅ Good</td>
+                            </tr>
+                            <tr class="good">
+                                <td><strong>Account Lockout Threshold</strong></td>
+                                <td>5 attempts</td>
+                                <td>✅ Good</td>
+                            </tr>
+                            <tr class="good">
+                                <td><strong>Account Lockout Duration</strong></td>
+                                <td>30 minutes</td>
+                                <td>✅ Good</td>
+                            </tr>
+                            <tr class="good">
+                                <td><strong>Lockout Observation Window</strong></td>
+                                <td>30 minutes</td>
+                                <td>✅ Good</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Printers -->
+        <div class="data-section">
+            <div class="section-header" onclick="toggleSection('printers')">
+                <h3>🖨️ Network Printers (8 printers)</h3>
+                <span>▼</span>
+            </div>
+            <div class="section-content" id="printers">
+                <div class="search-container">
+                    <input type="text" class="search-box" placeholder="Search printers..." onkeyup="searchTable(this, 'printersTable')">
+                    <span class="search-count">Showing 8 of 8 printers</span>
+                </div>
+                <table class="data-table" id="printersTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable(0, 'printersTable')">Printer Name</th>
+                            <th onclick="sortTable(1, 'printersTable')">Server Name</th>
+                            <th onclick="sortTable(2, 'printersTable')">Driver Name</th>
+                            <th onclick="sortTable(3, 'printersTable')">Location</th>
+                            <th onclick="sortTable(4, 'printersTable')">Comment</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Main_Printer</td>
+                            <td>PRINT01</td>
+                            <td>HP LaserJet Pro</td>
+                            <td>Main Office</td>
+                            <td>Main office printer</td>
+                        </tr>
+                        <tr>
+                            <td>Sales_Printer</td>
+                            <td>PRINT02</td>
+                            <td>Canon ImageRunner</td>
+                            <td>Sales Department</td>
+                            <td>Sales team printer</td>
+                        </tr>
+                        <tr>
+                            <td>IT_Printer</td>
+                            <td>PRINT03</td>
+                            <td>HP LaserJet Pro</td>
+                            <td>IT Department</td>
+                            <td>IT department printer</td>
+                        </tr>
+                        <tr>
+                            <td>Reception_Printer</td>
+                            <td>PRINT04</td>
+                            <td>Brother HL-L2350DW</td>
+                            <td>Reception</td>
+                            <td>Reception area printer</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Toggle section visibility
+        function toggleSection(sectionId) {
+            const content = document.getElementById(sectionId);
+            const header = content.previousElementSibling;
+            const arrow = header.querySelector('span');
+            
+            if (content.classList.contains('active')) {
+                content.classList.remove('active');
+                arrow.textContent = '▼';
+            } else {
+                content.classList.add('active');
+                arrow.textContent = '▲';
+            }
+        }
+
+        // Search functionality
+        function searchTable(searchBox, tableId) {
+            const table = document.getElementById(tableId);
+            const tbody = table.querySelector('tbody');
+            const rows = tbody.querySelectorAll('tr');
+            const searchTerm = searchBox.value.toLowerCase();
+            const countElement = searchBox.parentElement.querySelector('.search-count');
+            
+            let visibleCount = 0;
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                    visibleCount++;
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+            
+            const totalRows = rows.length;
+            countElement.textContent = `Showing ${visibleCount} of ${totalRows} items`;
+        }
+
+        // Sorting functionality
+        function sortTable(columnIndex, tableId) {
+            const table = document.getElementById(tableId);
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const header = table.querySelector(`th:nth-child(${columnIndex + 1})`);
+            
+            // Remove existing sort indicators
+            table.querySelectorAll('th').forEach(th => {
+                th.classList.remove('sorted-asc', 'sorted-desc');
+            });
+            
+            // Determine sort direction
+            const isAscending = !header.classList.contains('sorted-asc');
+            
+            // Sort rows
+            rows.sort((a, b) => {
+                const aValue = a.cells[columnIndex].textContent.trim();
+                const bValue = b.cells[columnIndex].textContent.trim();
+                
+                // Handle numeric values
+                const aNum = parseFloat(aValue);
+                const bNum = parseFloat(bValue);
+                
+                if (!isNaN(aNum) && !isNaN(bNum)) {
+                    return isAscending ? aNum - bNum : bNum - aNum;
+                }
+                
+                // Handle text values
+                if (isAscending) {
+                    return aValue.localeCompare(bValue);
+                } else {
+                    return bValue.localeCompare(aValue);
+                }
+            });
+            
+            // Reorder rows
+            rows.forEach(row => tbody.appendChild(row));
+            
+            // Update sort indicator
+            header.classList.add(isAscending ? 'sorted-asc' : 'sorted-desc');
+        }
+
+        // Initialize all sections as collapsed
+        document.addEventListener('DOMContentLoaded', function() {
+            const sections = document.querySelectorAll('.section-content');
+            sections.forEach(section => {
+                section.classList.remove('active');
+            });
+        });
+    </script>
+</body>
+</html> 
