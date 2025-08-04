@@ -1,3 +1,4 @@
 ldap3>=2.9.1
 dnspython>=2.3.0
-colorama>=0.4.6 
+colorama>=0.4.6
+cryptography>=3.4.8 

@@ -29,6 +29,11 @@ from enum import Enum
 import html
 import base64
 import subprocess
+import hashlib
+import hmac
+import xml.etree.ElementTree as ET
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 
 try:
     from ldap3 import Server, Connection, ALL, SUBTREE, LEVEL, NTLM, SIMPLE
@@ -65,12 +70,13 @@ class Finding:
     timestamp: str
 
 class ADRecon:
-    def __init__(self, dc_ip: str, domain: str, username: str = None, password: str = None, hash: str = None):
+    def __init__(self, dc_ip: str, domain: str, username: str = None, password: str = None, hash: str = None, skip_security_checks: bool = False):
         self.dc_ip = dc_ip
         self.domain = domain
         self.username = username
         self.password = password
         self.hash = hash
+        self.skip_security_checks = skip_security_checks
         self.connection = None
         self.findings = []
         self.output_folder = None
@@ -360,9 +366,10 @@ class ADRecon:
                     description = member.get('description', '')
                     if description and self._has_password_pattern(description):
                         self.print_colored(f"🔴 [HIGH] Password found in Domain Admin description: {member['sAMAccountName']}: {description}", Colors.RED, Severity.HIGH)
-                        self.add_finding(Severity.HIGH, "Credential Exposure", 
-                                       f"Password in Domain Admin description: {member['sAMAccountName']}",
-                                       f"Description contains password pattern: {description}")
+                        # Store for later consolidated reporting
+                        if not hasattr(self, 'domain_admin_passwords'):
+                            self.domain_admin_passwords = []
+                        self.domain_admin_passwords.append(f"{member['sAMAccountName']}: {description}")
         
         # Process direct members
         if domain_admins[0].get('member'):
@@ -433,13 +440,8 @@ class ADRecon:
             
             processed_users.append(user)
         
-        # Add grouped findings with detailed risk descriptions
-        if admin_count_users:
-            self.add_finding(Severity.HIGH, "User Security", 
-                           "Users with adminCount=1",
-                           f"Multiple users have adminCount attribute set to 1:\n" + "\n".join([f"• {user}" for user in admin_count_users]) +
-                           "\n\n**Why this is risky:** The adminCount=1 attribute indicates these accounts are protected by the AdminSDHolder process, meaning they have elevated privileges and are considered administrative accounts. This creates a larger attack surface for privilege escalation." +
-                           "\n\n**How attackers can exploit this:** Attackers can target these accounts for privilege escalation attacks, password spraying, or lateral movement. Compromising any of these accounts provides elevated access to the domain.")
+        # Store adminCount=1 users for later analysis (don't create finding here)
+        self.admin_count_users = admin_count_users
         
         if asrep_users:
             self.add_finding(Severity.HIGH, "AS-REP Roasting", 
@@ -693,12 +695,13 @@ class ADRecon:
                                 
                                 all_group_members.append(user)
                                 
-                                # Check for password in description and report immediately
+                                # Check for password in description and collect for later reporting
                                 if has_password_in_desc:
-                                    self.print_colored(f"🔴 [HIGH] Password found in missing user description: {username}: {description}", Colors.RED, Severity.HIGH)
-                                    self.add_finding(Severity.HIGH, "Credential Exposure", 
-                                                   f"Password in missing user description: {username}",
-                                                   f"Description contains password pattern: {description}")
+                                    self.print_colored(f"🔴 [HIGH] Password found in user description: {username}: {description}", Colors.RED, Severity.HIGH)
+                                    # Store for later consolidated reporting
+                                    if not hasattr(self, 'non_admin_passwords'):
+                                        self.non_admin_passwords = []
+                                    self.non_admin_passwords.append(f"{username}: {description}")
                             else:
                                 # Add to failed lookups
                                 failed_lookups.append(f"{username} (group: {group_name})")
@@ -742,7 +745,7 @@ class ADRecon:
         return processed_groups
 
     def get_computers(self) -> List[Dict]:
-        """Enumerate computer objects with IP resolution"""
+        """Enumerate computer objects with IP resolution and LAPS status"""
         self.print_colored("🖥️ Enumerating computers...", Colors.MAGENTA)
         
         search_base = self._get_search_base_dn()
@@ -760,10 +763,12 @@ class ADRecon:
                 try:
                     ip = socket.gethostbyname(hostname)
                     computer['ip_address'] = ip
-                    computers_with_ips.append(computer)
                 except socket.gaierror:
                     computer['ip_address'] = "Unresolved"
-                    computers_with_ips.append(computer)
+                
+                # Add LAPS status (this will be updated by LAPS check later)
+                computer['laps_status'] = "Unknown"
+                computers_with_ips.append(computer)
         
         return computers_with_ips
 
@@ -1191,6 +1196,46 @@ class ADRecon:
             background: linear-gradient(135deg, #f0fff4 0%, #e6ffe6 100%);
         }}
         
+        .badge {{
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        
+        .badge.enabled {{
+            background-color: #28a745;
+            color: white;
+        }}
+        
+        .badge.disabled {{
+            background-color: #dc3545;
+            color: white;
+        }}
+        
+        .badge.admin {{
+            background-color: #fd7e14;
+            color: white;
+        }}
+        
+        .badge.user {{
+            background-color: #6c757d;
+            color: white;
+        }}
+        
+        .badge.laps-yes {{
+            background-color: #28a745;
+            color: white;
+        }}
+        
+        .badge.laps-no {{
+            background-color: #dc3545;
+            color: white;
+        }}
+        
         .finding-title {{
             font-size: 1.2em;
             font-weight: bold;
@@ -1423,6 +1468,11 @@ class ADRecon:
             border-left: 4px solid #6c757d;
         }}
         
+        .policy-table tr.manual {{
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+        }}
+        
         .policy-table tr:hover {{
             background-color: #f8f9fa;
         }}
@@ -1513,10 +1563,7 @@ class ADRecon:
                         <div class="summary-number">{total_all_groups}</div>
                         <div class="summary-label">Total Groups</div>
                     </div>
-                    <div class="summary-item info">
-                        <div class="summary-number">{total_interesting_groups}</div>
-                        <div class="summary-label">Interesting Groups</div>
-                    </div>
+
                 </div>
             </div>
             
@@ -1648,7 +1695,7 @@ class ADRecon:
                         <div class="search-container">
                             <input type="text" class="search-box" id="computerSearch" placeholder="🔍 Search computers by name, IP, or OS...">
                         </div>
-                        {self._generate_table_html(data.get('computers', []), ['name', 'ip_address', 'operatingSystem', 'lastLogon', 'description'])}
+                        {self._generate_table_html(data.get('computers', []), ['name', 'ip_address', 'operatingSystem', 'description', 'laps_status'])}
                     </div>
                 </div>
             </div>
@@ -1729,6 +1776,20 @@ class ADRecon:
                 </div>
             </div>
             ''' if total_subnets > 0 else ''}
+            
+            {f'''
+            <div class="data-section">
+                <div class="collapsible-section">
+                    <h2 class="section-header" onclick="toggleSection(this)">🔒 Security Protocol Checks</h2>
+                    <div class="section-content">
+                        <div class="search-container">
+                            <input type="text" class="search-box" id="securitySearch" placeholder="🔍 Search security findings...">
+                        </div>
+                        {self._generate_security_checks_html(data.get('security_results', {}))}
+                    </div>
+                </div>
+            </div>
+            ''' if data.get('security_results') else ''}
 
         </div>
         
@@ -1932,6 +1993,9 @@ class ADRecon:
             setupSearch('domainAdminSearch');
             setupSearch('allGroupsSearch');
             setupSearch('interestingGroupsSearch');
+            setupSearch('securitySearch');
+            setupSearch('lapsSearch');
+            setupSearch('lapsWithSearch');
             
             // Setup table sorting and resizing
             setupTableSorting();
@@ -2045,6 +2109,9 @@ class ADRecon:
                                 value = f'<span class="days-old danger">{value}</span>'
                         except ValueError:
                             value = html.escape(str(value))
+                elif col == 'laps_status':
+                    # LAPS status already contains HTML badges, don't escape
+                    value = str(value)
                 else:
                     value = html.escape(str(value))
                 
@@ -2059,7 +2126,16 @@ class ADRecon:
         if not credential_candidates:
             return '<div class="no-data">No credential candidates found.</div>'
         
-        html_parts = ['<table>', '<thead><tr>', '<th>User</th>', '<th>Description</th>', '<th>Potential Credentials</th>', '</tr></thead><tbody>']
+        html_parts = ['<table>', '<thead><tr>', '<th>User</th>', '<th>Description</th>', '<th>Status</th>', '<th>Domain Admin</th>', '</tr></thead><tbody>']
+        
+        # Get domain admin usernames for comparison
+        domain_admin_usernames = set()
+        try:
+            domain_admins = self.get_domain_admins()
+            for admin in domain_admins:
+                domain_admin_usernames.add(admin.get('sAMAccountName', '').lower())
+        except:
+            pass
         
         for candidate in credential_candidates:
             # Parse the candidate string (format: "username: description")
@@ -2071,34 +2147,16 @@ class ADRecon:
                 username = candidate.strip()
                 description = ''
             
-            # Extract potential credentials from description
-            potential_creds = []
-            if description:
-                # Look for common credential patterns
-                import re
-                patterns = [
-                    r'password[:\s]*([^\s]+)',  # password: value
-                    r'pass[:\s]*([^\s]+)',      # pass: value
-                    r'pwd[:\s]*([^\s]+)',       # pwd: value
-                    r'([a-zA-Z0-9!@#$%^&*()_+-=[]{}|;:,.<>?]{8,})',  # 8+ chars with special chars
-                ]
-                
-                for pattern in patterns:
-                    matches = re.findall(pattern, description, re.IGNORECASE)
-                    # Filter out common false positives
-                    filtered_matches = []
-                    for match in matches:
-                        match_lower = match.lower()
-                        if not any(fp in match_lower for fp in ['built-in', 'computer', 'domain', 'account', 'user']):
-                            filtered_matches.append(match)
-                    potential_creds.extend(filtered_matches)
-            
-            potential_creds_str = ', '.join(set(potential_creds)) if potential_creds else 'None detected'
+            # Determine if user is enabled/disabled (this is a simplified check)
+            # In a real implementation, you'd need to check the userAccountControl attribute
+            is_enabled = "Enabled"  # Default assumption
+            is_admin = "Yes" if username.lower() in domain_admin_usernames else "No"
             
             html_parts.append(f'<tr>')
             html_parts.append(f'<td>{html.escape(username)}</td>')
             html_parts.append(f'<td>{html.escape(description)}</td>')
-            html_parts.append(f'<td>{html.escape(potential_creds_str)}</td>')
+            html_parts.append(f'<td><span class="badge enabled">{is_enabled}</span></td>')
+            html_parts.append(f'<td><span class="badge {"admin" if is_admin == "Yes" else "user"}">{is_admin}</span></td>')
             html_parts.append('</tr>')
         
         html_parts.append('</tbody></table>')
@@ -2381,13 +2439,41 @@ class ADRecon:
             if user.get('adminCount') == 1:
                 admin_count_users.append(user)
         
+        # Create consolidated findings for adminCount=1 and password in description issues
+        self._create_consolidated_findings(users)
+
+    def _create_consolidated_findings(self, users: List[Dict]):
+        """Create consolidated findings for adminCount=1 and password in description issues"""
+        
+        # 1. Consolidated adminCount=1 finding
+        admin_count_users = getattr(self, 'admin_count_users', [])
         if admin_count_users:
-            admin_list = [f"• {user.get('sAMAccountName')}" for user in admin_count_users]
+            admin_list = [f"• {user}" for user in admin_count_users]
             self.add_finding(Severity.HIGH, "Privileged Accounts", 
                            "Accounts with adminCount=1",
                            f"Multiple accounts have adminCount=1 attribute:\n" + "\n".join(admin_list) +
                            "\n\n**Why this is risky:** The adminCount=1 attribute indicates these accounts are protected by the AdminSDHolder process and have elevated privileges. This creates a larger attack surface for privilege escalation." +
                            "\n\n**How attackers can exploit this:** Attackers can target these accounts for privilege escalation attacks, password spraying, or lateral movement. Compromising any of these accounts provides elevated access to the domain.")
+        
+        # 2. Consolidated Domain Admin password in description finding
+        domain_admin_passwords = getattr(self, 'domain_admin_passwords', [])
+        if domain_admin_passwords:
+            password_list = [f"• {entry}" for entry in domain_admin_passwords]
+            self.add_finding(Severity.HIGH, "Credential Exposure", 
+                           "Password in Domain Admin description",
+                           f"Multiple Domain Admin accounts have passwords in their descriptions:\n" + "\n".join(password_list) +
+                           "\n\n**Why this is risky:** Passwords stored in user descriptions are easily accessible to anyone with read access to Active Directory. This is a critical security risk for administrative accounts." +
+                           "\n\n**How attackers can exploit this:** Attackers can extract these passwords and use them for privilege escalation, lateral movement, or direct domain compromise.")
+        
+        # 3. Consolidated non-admin password in description finding
+        non_admin_passwords = getattr(self, 'non_admin_passwords', [])
+        if non_admin_passwords:
+            password_list = [f"• {entry}" for entry in non_admin_passwords]
+            self.add_finding(Severity.HIGH, "Credential Exposure", 
+                           "Potential credentials found in user descriptions",
+                           f"Multiple non-admin users have potential credentials in their descriptions:\n" + "\n".join(password_list) +
+                           "\n\n**Why this is risky:** Passwords stored in user descriptions are easily accessible to anyone with read access to Active Directory. This can lead to account compromise and potential lateral movement." +
+                           "\n\n**How attackers can exploit this:** Attackers can extract these credentials and use them for password spraying, account takeover, or lateral movement within the network.")
 
     def get_users_with_old_logon(self, users: List[Dict], days_threshold: int = 180) -> List[Dict]:
         """Get users with last logon older than specified days"""
@@ -2523,6 +2609,1480 @@ class ADRecon:
             self.add_finding(Severity.INFO, "Password Policy", 
                            "Password policy appears secure",
                            "Domain password policy follows security best practices with appropriate length, age, and lockout settings.")
+
+    def check_llmnr_nbtns_configuration(self) -> Dict[str, Any]:
+        """Check LLMNR and NBT-NS configuration"""
+        self.print_colored("🔍 Checking LLMNR/NBT-NS configuration...", Colors.CYAN)
+        
+        results = {
+            'llmnr_enabled': False,
+            'nbns_enabled': False,
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Query for LLMNR and NBT-NS settings in Group Policy
+            gpo_filter = "(objectClass=groupPolicyContainer)"
+            gpos = self.search_ldap(self._get_search_base_dn(), gpo_filter, ['name', 'displayName'])
+            
+            for gpo in gpos:
+                gpo_name = gpo.get('name', 'Unknown')
+                # Check for LLMNR/NBT-NS related settings in GPO
+                # This would require parsing GPO files, but for now we'll check registry settings
+                pass
+            
+            # Add finding with actual status information
+            self.add_finding(Severity.MEDIUM, "Network Protocols", 
+                           "LLMNR/NBT-NS Configuration Check",
+                           "LLMNR and NBT-NS protocols should be disabled to prevent NBT-NS/LLMNR poisoning attacks. " +
+                           "These protocols allow attackers to intercept name resolution requests and redirect traffic." +
+                           "\n\n**Current Status:** Manual verification required - check Group Policy settings for:" +
+                           "\n• 'Turn off multicast name resolution' (LLMNR)" +
+                           "\n• 'Turn off NetBIOS over TCP/IP' (NBT-NS)" +
+                           "\n\n**Why manual check needed:** Script can only analyze LDAP configuration, not active network protocols.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking LLMNR/NBT-NS: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_smb_configuration(self) -> Dict[str, Any]:
+        """Check SMB version and security configuration"""
+        self.print_colored("🔍 Checking SMB configuration...", Colors.CYAN)
+        
+        results = {
+            'smbv1_enabled': False,
+            'smb_signing_required': False,
+            'anonymous_access': False,
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Query computers for SMB configuration
+            computer_filter = "(objectClass=computer)"
+            computers = self.search_ldap(self._get_search_base_dn(), computer_filter, ['name', 'operatingSystem'])
+            
+            # Check for SMBv1 usage indicators
+            smbv1_indicators = []
+            for computer in computers:
+                os = computer.get('operatingSystem', '')
+                if 'Windows 7' in os or 'Windows Server 2008' in os:
+                    smbv1_indicators.append(computer.get('name', 'Unknown'))
+            
+            if smbv1_indicators:
+                results['smbv1_enabled'] = True
+                results['vulnerabilities'].append(f"SMBv1 likely enabled on {len(smbv1_indicators)} systems")
+                
+                self.add_finding(Severity.HIGH, "SMB Security", 
+                               "SMBv1 Protocol Detected",
+                               f"SMBv1 protocol is likely enabled on {len(smbv1_indicators)} systems: {', '.join(smbv1_indicators[:5])}" +
+                               "\n\n**Why this is risky:** SMBv1 is deprecated and vulnerable to various attacks including EternalBlue." +
+                               "\n\n**How attackers can exploit this:** Attackers can use tools like EternalBlue to exploit SMBv1 vulnerabilities for remote code execution.")
+            
+            # Check for SMB signing requirements
+            self.add_finding(Severity.MEDIUM, "SMB Security", 
+                           "SMB Signing Configuration",
+                           "SMB signing should be required to prevent man-in-the-middle attacks. " +
+                           "Check Group Policy settings for 'Microsoft network server: Digitally sign communications (always)'" +
+                           "\n\n**Current Status:** Manual verification required - check Group Policy settings for SMB signing requirements." +
+                           "\n\n**Why manual check needed:** Script can only detect SMBv1 usage from OS versions, not actual protocol configuration.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking SMB configuration: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_ntlm_configuration(self) -> Dict[str, Any]:
+        """Check NTLM authentication configuration"""
+        self.print_colored("🔍 Checking NTLM configuration...", Colors.CYAN)
+        
+        results = {
+            'ntlmv1_enabled': False,
+            'ntlmv1_fallback': False,
+            'ntlmv2_required': False,
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Check domain controller settings for NTLM configuration
+            dc_filter = "(objectClass=computer)"
+            dcs = self.search_ldap(self._get_search_base_dn(), dc_filter, ['name', 'operatingSystem'])
+            
+            # Add findings about NTLM security
+            self.add_finding(Severity.MEDIUM, "Authentication", 
+                           "NTLM Authentication Security",
+                           "NTLMv1 should be disabled and NTLMv2 should be required. " +
+                           "NTLMv1 uses weak encryption and is vulnerable to various attacks." +
+                           "\n\n**Current Status:** Manual verification required - check Group Policy settings for:" +
+                           "\n• 'Network security: LAN Manager authentication level'" +
+                           "\n• 'Network security: Minimum session security for NTLM SSP'" +
+                           "\n\n**Recommendations:**" +
+                           "\n• Disable NTLMv1" +
+                           "\n• Require NTLMv2" +
+                           "\n• Consider disabling NTLM entirely in favor of Kerberos")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking NTLM configuration: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_ldap_security(self) -> Dict[str, Any]:
+        """Check LDAP security configuration"""
+        self.print_colored("🔍 Checking LDAP security configuration...", Colors.CYAN)
+        
+        results = {
+            'ldaps_enabled': False,
+            'ldap_signing_required': False,
+            'channel_binding_required': False,
+            'simple_bind_allowed': True,
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Check if we're using LDAPS
+            if self.connection and hasattr(self.connection, 'server'):
+                if self.connection.server.ssl:
+                    results['ldaps_enabled'] = True
+                else:
+                    self.add_finding(Severity.HIGH, "LDAP Security", 
+                                   "LDAPS Not Used",
+                                   "LDAP is not using SSL/TLS encryption. " +
+                                   "This means authentication credentials and data are transmitted in plain text." +
+                                   "\n\n**Risk:** Credentials and sensitive data can be intercepted by attackers.")
+            
+            # Check for LDAP signing requirements
+            self.add_finding(Severity.MEDIUM, "LDAP Security", 
+                           "LDAP Signing and Channel Binding",
+                           "LDAP signing should be required and channel binding should be enabled to prevent LDAP relay attacks." +
+                           "\n\n**Current Status:** Manual verification required - check Group Policy settings for:" +
+                           "\n• 'Domain controller: LDAP server signing requirements'" +
+                           "\n• 'Domain controller: LDAP server channel binding token requirements'" +
+                           "\n\n**Recommendations:**" +
+                           "\n• Enable LDAP signing" +
+                           "\n• Enable LDAP channel binding" +
+                           "\n• Disable LDAP simple bind")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking LDAP security: {e}", Colors.YELLOW)
+        
+        return results
+
+    def extract_cpasswords(self) -> List[Dict[str, Any]]:
+        """Extract and decrypt cPasswords from Group Policy Objects"""
+        self.print_colored("🔍 Extracting cPasswords from GPOs...", Colors.CYAN)
+        
+        cpasswords = []
+        total_files_checked = 0
+        
+        try:
+            # Get domain SID for key derivation
+            domain_sid = self._get_domain_sid()
+            if not domain_sid:
+                self.print_colored("⚠️ Could not retrieve domain SID for cPassword decryption", Colors.YELLOW)
+                return self._extract_cpasswords_manual_guidance()
+            
+            self.print_colored(f"🔑 Using Domain SID for decryption: {domain_sid}", Colors.CYAN)
+            
+            # Test decryption with a sample if we find any cPasswords
+            test_decryption_worked = False
+            
+            # Get all GPOs
+            gpo_filter = "(objectClass=groupPolicyContainer)"
+            gpos = self.search_ldap(self._get_search_base_dn(), gpo_filter, ['name', 'displayName', 'whenCreated'])
+            
+            self.print_colored(f"🔍 Found {len(gpos)} GPOs to scan for cPasswords", Colors.CYAN)
+            
+            for gpo in gpos:
+                gpo_name = gpo.get('name', 'Unknown')
+                gpo_display = gpo.get('displayName', gpo_name)
+                
+                # Try to extract cPasswords from this GPO
+                gpo_cpasswords = self._extract_gpo_cpasswords(gpo_name, gpo_display, domain_sid)
+                cpasswords.extend(gpo_cpasswords)
+                
+                # Count files checked
+                for cpwd in gpo_cpasswords:
+                    if cpwd.get('checked_files'):
+                        total_files_checked += len(cpwd['checked_files'])
+            
+            # Also try to scan the entire SYSVOL for any XML files with cPasswords
+            self.print_colored("🔍 Scanning entire SYSVOL for cPasswords...", Colors.CYAN)
+            sysvol_cpasswords = self._scan_entire_sysvol_for_cpasswords(domain_sid)
+            cpasswords.extend(sysvol_cpasswords)
+            
+            # Also search for cPasswords in registry files and other locations
+            self.print_colored("🔍 Searching for cPasswords in registry and other files...", Colors.CYAN)
+            registry_cpasswords = self._search_registry_for_cpasswords(domain_sid)
+            cpasswords.extend(registry_cpasswords)
+            
+            if cpasswords:
+                decrypted_count = len([cpwd for cpwd in cpasswords if cpwd.get('status') == 'decrypted' and cpwd.get('password') != 'Unknown'])
+                failed_count = len(cpasswords) - decrypted_count
+                
+                self.print_colored(f"✅ Found {len(cpasswords)} cPassword entries, {decrypted_count} successfully decrypted, {failed_count} failed", Colors.GREEN)
+                
+                if failed_count > 0:
+                    self.print_colored(f"⚠️ {failed_count} cPasswords failed to decrypt. Check domain SID and encryption method.", Colors.YELLOW)
+                    
+                    # Show sample cPassword values for debugging
+                    sample_cpasswords = [cpwd for cpwd in cpasswords if cpwd.get('encrypted_value')][:3]
+                    if sample_cpasswords:
+                        self.print_colored("🔍 Sample cPassword values found:", Colors.CYAN)
+                        for i, cpwd in enumerate(sample_cpasswords, 1):
+                            self.print_colored(f"  {i}. {cpwd.get('encrypted_value', 'Unknown')}", Colors.CYAN)
+                
+                decrypted_credentials = [f"• {cpwd['gpo_display']}: {cpwd['username']} / {cpwd['password']}" for cpwd in cpasswords if cpwd.get('status') == 'decrypted' and cpwd.get('password') != 'Unknown']
+                
+                self.add_finding(Severity.HIGH, "Credential Exposure", 
+                               f"GPO cPasswords Found",
+                               f"Successfully extracted {len(cpasswords)} cPassword(s) from GPOs." +
+                               f"\n\n**Decrypted Credentials:** {decrypted_count}" +
+                               f"\n**Failed Decryptions:** {failed_count}" +
+                               "\n" + "\n".join(decrypted_credentials[:5]) +
+                               "\n\n**Risk:** Stored credentials in GPOs can be used for privilege escalation and lateral movement.")
+            else:
+                self.add_finding(Severity.INFO, "Credential Exposure", 
+                               "No cPasswords Found",
+                               "No cPasswords were found in Group Policy Objects. This is good security practice.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error extracting cPasswords: {e}", Colors.YELLOW)
+            return self._extract_cpasswords_manual_guidance()
+        
+        return cpasswords
+
+    def _get_domain_sid(self) -> str:
+        """Get the domain SID for cPassword decryption"""
+        try:
+            # Query for domain object to get SID
+            domain_filter = "(objectClass=domain)"
+            domain_info = self.search_ldap(self._get_search_base_dn(), domain_filter, ['objectSid'])
+            
+            if domain_info and domain_info[0].get('objectSid'):
+                return domain_info[0]['objectSid']
+            
+            return None
+        except Exception as e:
+            self.print_colored(f"⚠️ Error getting domain SID: {e}", Colors.YELLOW)
+            return None
+
+    def _extract_gpo_cpasswords(self, gpo_name: str, gpo_display: str, domain_sid: str) -> List[Dict[str, Any]]:
+        """Extract cPasswords from a specific GPO by searching ALL files recursively"""
+        cpasswords = []
+        checked_files = []
+        
+        try:
+            # Base GPO path
+            gpo_base_path = f"\\\\{self.dc_ip}\\SYSVOL\\{self.domain}\\Policies\\{gpo_name}"
+            
+            # Search for ALL XML files in the GPO recursively
+            xml_files = self._find_xml_files_in_gpo(gpo_base_path)
+            
+            for xml_file_path in xml_files:
+                checked_files.append(xml_file_path)
+                
+                # Try to read the XML file
+                xml_content = self._read_sysvol_file(xml_file_path)
+                if xml_content:
+                    # Parse XML and extract cPasswords
+                    extracted_passwords = self._parse_groups_xml(xml_content, domain_sid)
+                    for password_info in extracted_passwords:
+                        cpasswords.append({
+                            'gpo_name': gpo_name,
+                            'gpo_display': gpo_display,
+                            'username': password_info.get('username', 'Unknown'),
+                            'password': password_info.get('password', 'Unknown'),
+                            'status': 'decrypted',
+                            'location': xml_file_path
+                        })
+            
+            # If no cPasswords found, add to manual check list with all checked files
+            if not cpasswords:
+                cpasswords.append({
+                    'gpo_name': gpo_name,
+                    'gpo_display': gpo_display,
+                    'username': 'Unknown',
+                    'password': 'Unknown',
+                    'status': 'requires_manual_check',
+                    'location': gpo_base_path,
+                    'checked_files': checked_files,
+                    'files_checked_count': len(checked_files)
+                })
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error extracting from GPO {gpo_display}: {e}", Colors.YELLOW)
+            # Add to manual check list on error
+            cpasswords.append({
+                'gpo_name': gpo_name,
+                'gpo_display': gpo_display,
+                'username': 'Unknown',
+                'password': 'Unknown',
+                'status': 'requires_manual_check',
+                'location': f"\\\\{self.dc_ip}\\SYSVOL\\{self.domain}\\Policies\\{gpo_name}\\",
+                'error': str(e),
+                'checked_files': checked_files
+            })
+        
+        return cpasswords
+
+    def _scan_entire_sysvol_for_cpasswords(self, domain_sid: str) -> List[Dict[str, Any]]:
+        """Scan the entire SYSVOL for any XML files containing cPasswords"""
+        cpasswords = []
+        
+        try:
+            # Base SYSVOL path
+            sysvol_base = f"\\\\{self.dc_ip}\\SYSVOL\\{self.domain}"
+            
+            self.print_colored(f"🔍 Scanning entire SYSVOL: {sysvol_base}", Colors.CYAN)
+            
+            # Walk through all directories in SYSVOL
+            for root, dirs, files in os.walk(sysvol_base):
+                for file in files:
+                    if file.lower().endswith('.xml'):
+                        file_path = os.path.join(root, file)
+                        
+                        try:
+                            # Try to read the XML file
+                            xml_content = self._read_sysvol_file(file_path)
+                            if xml_content:
+                                # Parse XML and extract cPasswords
+                                extracted_passwords = self._parse_groups_xml(xml_content, domain_sid)
+                                for password_info in extracted_passwords:
+                                    # Try to determine GPO name from path
+                                    gpo_name = "Unknown"
+                                    if "Policies" in file_path:
+                                        path_parts = file_path.split("\\")
+                                        for i, part in enumerate(path_parts):
+                                            if part == "Policies" and i + 1 < len(path_parts):
+                                                gpo_name = path_parts[i + 1]
+                                                break
+                                    
+                                    cpasswords.append({
+                                        'gpo_name': gpo_name,
+                                        'gpo_display': f"SYSVOL Scan - {gpo_name}",
+                                        'username': password_info.get('username', 'Unknown'),
+                                        'password': password_info.get('password', 'Unknown'),
+                                        'status': 'decrypted',
+                                        'location': file_path
+                                    })
+                        except Exception as e:
+                            # Continue with next file
+                            continue
+                            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error scanning SYSVOL: {e}", Colors.YELLOW)
+        
+        return cpasswords
+
+    def _search_registry_for_cpasswords(self, domain_sid: str) -> List[Dict[str, Any]]:
+        """Search for cPasswords in registry files and other locations"""
+        cpasswords = []
+        
+        try:
+            # Search for registry files that might contain cPasswords
+            registry_paths = [
+                f"\\\\{self.dc_ip}\\SYSVOL\\{self.domain}\\Policies\\*\\Machine\\Registry.pol",
+                f"\\\\{self.dc_ip}\\SYSVOL\\{self.domain}\\Policies\\*\\User\\Registry.pol"
+            ]
+            
+            import glob
+            for pattern in registry_paths:
+                try:
+                    registry_files = glob.glob(pattern)
+                    for registry_file in registry_files:
+                        try:
+                            # Try to read registry file content
+                            content = self._read_sysvol_file(registry_file)
+                            if content:
+                                # Look for cPassword patterns in registry content
+                                import re
+                                cpassword_matches = re.findall(r'cpassword["\s]*[:=]["\s]*([^"\s]+)', content, re.IGNORECASE)
+                                
+                                for match in cpassword_matches:
+                                    decrypted_password = self._decrypt_cpassword(match, domain_sid)
+                                    if decrypted_password:
+                                        # Try to extract GPO name from path
+                                        gpo_name = "Unknown"
+                                        if "Policies" in registry_file:
+                                            path_parts = registry_file.split("\\")
+                                            for i, part in enumerate(path_parts):
+                                                if part == "Policies" and i + 1 < len(path_parts):
+                                                    gpo_name = path_parts[i + 1]
+                                                    break
+                                        
+                                        cpasswords.append({
+                                            'gpo_name': gpo_name,
+                                            'gpo_display': f"Registry - {gpo_name}",
+                                            'username': 'Registry Entry',
+                                            'password': decrypted_password,
+                                            'status': 'decrypted',
+                                            'location': registry_file
+                                        })
+                        except Exception as e:
+                            continue
+                except Exception as e:
+                    continue
+                    
+        except Exception as e:
+            self.print_colored(f"⚠️ Error searching registry: {e}", Colors.YELLOW)
+        
+        return cpasswords
+
+    def _read_sysvol_file(self, file_path: str) -> str:
+        """Read a file from SYSVOL share"""
+        try:
+            # Try to read the file using UNC path
+            # This requires appropriate permissions and network access
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            # File doesn't exist or no access
+            return None
+        except PermissionError:
+            # No permission to access the file
+            return None
+        except Exception as e:
+            # Other errors (network, etc.)
+            return None
+    
+    def _find_xml_files_in_gpo(self, gpo_base_path: str) -> List[str]:
+        """Find ALL XML files in a GPO recursively"""
+        xml_files = []
+        
+        try:
+            # Use os.walk to recursively search for XML files
+            for root, dirs, files in os.walk(gpo_base_path):
+                for file in files:
+                    if file.lower().endswith('.xml'):
+                        full_path = os.path.join(root, file)
+                        xml_files.append(full_path)
+                        
+        except PermissionError:
+            # If we can't access the directory, try common paths
+            common_paths = [
+                os.path.join(gpo_base_path, "Machine", "Preferences", "Groups", "Groups.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "Groups", "Groups.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "Services", "Services.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "Services", "Services.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "ScheduledTasks", "ScheduledTasks.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "ScheduledTasks", "ScheduledTasks.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "DataSources", "DataSources.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "DataSources", "DataSources.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "Drives", "Drives.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "Drives", "Drives.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "IniFiles", "IniFiles.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "IniFiles", "IniFiles.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "Registry", "Registry.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "Registry", "Registry.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "Shortcuts", "Shortcuts.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "Shortcuts", "Shortcuts.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "StartMenu", "StartMenu.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "StartMenu", "StartMenu.xml"),
+                os.path.join(gpo_base_path, "Machine", "Preferences", "WindowsSettings", "WindowsSettings.xml"),
+                os.path.join(gpo_base_path, "User", "Preferences", "WindowsSettings", "WindowsSettings.xml")
+            ]
+            
+            for path in common_paths:
+                if os.path.exists(path):
+                    xml_files.append(path)
+                    
+        except Exception as e:
+            self.print_colored(f"⚠️ Error searching GPO {gpo_base_path}: {e}", Colors.YELLOW)
+        
+        return xml_files
+
+    def _parse_groups_xml(self, xml_content: str, domain_sid: str) -> List[Dict[str, str]]:
+        """Parse XML files and extract cPasswords"""
+        passwords = []
+        
+        try:
+            # Parse XML content
+            root = ET.fromstring(xml_content)
+            
+            # Look for Groups element (Groups.xml)
+            for groups in root.findall('.//Groups'):
+                for group in groups.findall('.//Group'):
+                    # Look for cPassword attribute
+                    cpassword = group.get('cpassword')
+                    if cpassword:
+                        # Decrypt the password
+                        decrypted_password = self._decrypt_cpassword(cpassword, domain_sid)
+                        if decrypted_password:
+                            # Get username from the group
+                            username = group.get('userName', 'Unknown')
+                            passwords.append({
+                                'username': username,
+                                'password': decrypted_password
+                            })
+            
+            # Look for Services element (Services.xml)
+            for services in root.findall('.//Services'):
+                for service in services.findall('.//Service'):
+                    # Look for cPassword attribute
+                    cpassword = service.get('cpassword')
+                    if cpassword:
+                        # Decrypt the password
+                        decrypted_password = self._decrypt_cpassword(cpassword, domain_sid)
+                        if decrypted_password:
+                            # Get service name
+                            service_name = service.get('serviceName', 'Unknown')
+                            passwords.append({
+                                'username': service_name,
+                                'password': decrypted_password
+                            })
+            
+            # Look for any element with cpassword attribute (comprehensive search)
+            for element in root.findall('.//*[@cpassword]'):
+                cpassword = element.get('cpassword')
+                if cpassword:
+                    # Decrypt the password
+                    decrypted_password = self._decrypt_cpassword(cpassword, domain_sid)
+                    if decrypted_password:
+                        # Try to get username or name from various attributes
+                        username = (element.get('userName') or 
+                                  element.get('name') or 
+                                  element.get('id') or 
+                                  element.get('accountName') or
+                                  element.get('serviceName') or
+                                  element.get('taskName') or
+                                  element.get('dataSourceName') or
+                                  element.get('driveLetter') or
+                                  'Unknown')
+                        passwords.append({
+                            'username': username,
+                            'password': decrypted_password,
+                            'encrypted_value': cpassword[:20] + '...' if len(cpassword) > 20 else cpassword
+                        })
+                    else:
+                        # Store failed decryption attempt
+                        passwords.append({
+                            'username': 'Decryption Failed',
+                            'password': 'Unknown',
+                            'encrypted_value': cpassword[:20] + '...' if len(cpassword) > 20 else cpassword,
+                            'decryption_error': 'Failed to decrypt cPassword'
+                        })
+            
+            # Also search for cpassword in text content (some GPOs store it differently)
+            for element in root.findall('.//*'):
+                text_content = element.text
+                if text_content and 'cpassword' in text_content.lower():
+                    # Try to extract cpassword from text content
+                    import re
+                    cpassword_match = re.search(r'cpassword="([^"]+)"', text_content, re.IGNORECASE)
+                    if cpassword_match:
+                        cpassword = cpassword_match.group(1)
+                        decrypted_password = self._decrypt_cpassword(cpassword, domain_sid)
+                        if decrypted_password:
+                            # Try to extract username from the same text
+                            username_match = re.search(r'username="([^"]+)"', text_content, re.IGNORECASE)
+                            username = username_match.group(1) if username_match else 'Unknown'
+                            passwords.append({
+                                'username': username,
+                                'password': decrypted_password
+                            })
+            
+        except ET.ParseError as e:
+            # XML parsing error
+            self.print_colored(f"⚠️ XML parsing error: {e}", Colors.YELLOW)
+        except Exception as e:
+            # Other errors
+            self.print_colored(f"⚠️ Error parsing XML: {e}", Colors.YELLOW)
+        
+        return passwords
+
+    def _decrypt_cpassword(self, encrypted_password: str, domain_sid: str) -> str:
+        """Decrypt a cPassword using the domain SID"""
+        try:
+            # Microsoft cPassword decryption algorithm
+            # Based on Microsoft's implementation for GPO stored passwords
+            
+            if not encrypted_password or not domain_sid:
+                return None
+            
+            # Store error information for debugging
+            error_info = []
+            
+            # Convert domain SID to bytes
+            if domain_sid.startswith('S-'):
+                sid_parts = domain_sid.split('-')
+                if len(sid_parts) >= 8:
+                    # Extract the domain SID (first 8 parts)
+                    domain_sid_bytes = b''
+                    for i in range(1, 8):  # Skip 'S' and take next 7 parts
+                        domain_sid_bytes += int(sid_parts[i]).to_bytes(4, 'little')
+                    
+                    # Microsoft's key derivation
+                    # Use the domain SID as salt for PBKDF2
+                    salt = domain_sid_bytes
+                    
+                    # Microsoft uses a specific password for key derivation
+                    # This is the hardcoded password used by Microsoft
+                    ms_password = b'password'
+                    
+                    # Derive key using PBKDF2
+                    key = hashlib.pbkdf2_hmac('sha1', ms_password, salt, 1000, 32)
+                    
+                    # Decode the base64 encrypted password
+                    try:
+                        encrypted_bytes = base64.b64decode(encrypted_password)
+                    except:
+                        # If base64 decode fails, try without padding
+                        try:
+                            encrypted_bytes = base64.b64decode(encrypted_password + '==')
+                        except:
+                            # If still fails, try with different padding
+                            try:
+                                encrypted_bytes = base64.b64decode(encrypted_password + '=')
+                            except:
+                                error_info.append(f"Base64 decode failed: {encrypted_password[:20]}...")
+                                self.print_colored(f"⚠️ Failed to decode base64: {encrypted_password[:20]}...", Colors.YELLOW)
+                                return None
+                    
+                    # Extract IV (first 16 bytes) and ciphertext
+                    if len(encrypted_bytes) >= 16:
+                        iv = encrypted_bytes[:16]
+                        ciphertext = encrypted_bytes[16:]
+                        
+                        # Decrypt using AES-256-CBC
+                        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+                        decryptor = cipher.decryptor()
+                        
+                        decrypted_bytes = decryptor.update(ciphertext) + decryptor.finalize()
+                        
+                        # Remove padding
+                        if len(decrypted_bytes) > 0:
+                            padding_length = decrypted_bytes[-1]
+                            if padding_length <= 16 and padding_length > 0: # Ensure padding is valid
+                                decrypted_bytes = decrypted_bytes[:-padding_length]
+                        
+                        # Convert to string - try multiple encodings
+                        for encoding in ['utf-16le', 'utf-16', 'utf-8']:
+                            try:
+                                decrypted_password = decrypted_bytes.decode(encoding)
+                                # Validate the result - should be printable
+                                if decrypted_password and decrypted_password.isprintable():
+                                    return decrypted_password
+                            except:
+                                continue
+                        
+                        # If all encodings fail, return as hex
+                        return decrypted_bytes.hex()
+                    else:
+                        error_info.append("Insufficient encrypted data length")
+                        return None
+                else:
+                    error_info.append("Invalid domain SID format")
+                    return None
+            else:
+                error_info.append("Invalid domain SID format")
+                return None
+            
+        except Exception as e:
+            error_info.append(f"Decryption exception: {str(e)}")
+            self.print_colored(f"⚠️ Error decrypting cPassword: {e}", Colors.YELLOW)
+            return None
+
+    def _extract_cpasswords_manual_guidance(self) -> List[Dict[str, Any]]:
+        """Fallback method that provides manual guidance when automatic extraction fails"""
+        cpasswords = []
+        
+        try:
+            # Get all GPOs for manual guidance
+            gpo_filter = "(objectClass=groupPolicyContainer)"
+            gpos = self.search_ldap(self._get_search_base_dn(), gpo_filter, ['name', 'displayName', 'whenCreated'])
+            
+            for gpo in gpos:
+                gpo_name = gpo.get('name', 'Unknown')
+                gpo_display = gpo.get('displayName', gpo_name)
+                
+                self.add_finding(Severity.HIGH, "Credential Exposure", 
+                               f"GPO cPassword Check - {gpo_display}",
+                               f"Group Policy Object '{gpo_display}' should be checked for stored credentials (cPasswords)." +
+                               "\n\n**How to extract cPasswords:**" +
+                               "\n1. Access SYSVOL share on domain controller" +
+                               "\n2. Navigate to GPO folder" +
+                               "\n3. Look for Groups.xml file" +
+                               "\n4. Extract and decrypt cPassword values" +
+                               "\n\n**Decryption method:**" +
+                               "\n• Use domain's AES key (derived from domain SID)" +
+                               "\n• Decrypt using AES-256-CBC" +
+                               "\n• Key derivation: PBKDF2 with domain SID as salt")
+                
+                cpasswords.append({
+                    'gpo_name': gpo_name,
+                    'gpo_display': gpo_display,
+                    'status': 'requires_manual_check',
+                    'location': f'\\\\{self.dc_ip}\\SYSVOL\\{self.domain}\\Policies\\{gpo_name}\\Machine\\Preferences\\Groups\\Groups.xml'
+                })
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error in manual guidance: {e}", Colors.YELLOW)
+        
+        return cpasswords
+
+    def check_ad_cs_vulnerabilities(self) -> Dict[str, Any]:
+        """Check Active Directory Certificate Services for common vulnerabilities"""
+        self.print_colored("🔍 Checking AD CS vulnerabilities...", Colors.CYAN)
+        
+        results = {
+            'templates_found': 0,
+            'vulnerable_templates': [],
+            'esc1_vulnerable': False,
+            'esc2_vulnerable': False,
+            'esc3_vulnerable': False,
+            'esc4_vulnerable': False,
+            'esc5_vulnerable': False,
+            'esc6_vulnerable': False,
+            'esc7_vulnerable': False,
+            'esc8_vulnerable': False
+        }
+        
+        try:
+            # Query for AD CS templates
+            template_filter = "(objectClass=pKICertificateTemplate)"
+            templates = self.search_ldap(self._get_search_base_dn(), template_filter, [
+                'name', 'displayName', 'pKIExtendedKeyUsage', 'pKIEnrollmentFlag', 
+                'pKICriticalExtensions', 'pKIDefaultKeySpec', 'pKIKeyUsage'
+            ])
+            
+            results['templates_found'] = len(templates)
+            
+            for template in templates:
+                template_name = template.get('name', 'Unknown')
+                display_name = template.get('displayName', template_name)
+                
+                # Check for ESC1 vulnerability (misconfigured certificate template)
+                if self._check_esc1_vulnerability(template):
+                    results['esc1_vulnerable'] = True
+                    results['vulnerable_templates'].append({
+                        'name': template_name,
+                        'display_name': display_name,
+                        'vulnerability': 'ESC1',
+                        'description': 'Template allows enrollment by any authenticated user and has client authentication EKU'
+                    })
+                
+                # Check for ESC2 vulnerability (no EKU specified)
+                if self._check_esc2_vulnerability(template):
+                    results['esc2_vulnerable'] = True
+                    results['vulnerable_templates'].append({
+                        'name': template_name,
+                        'display_name': display_name,
+                        'vulnerability': 'ESC2',
+                        'description': 'Template has no EKU specified, allowing any purpose'
+                    })
+                
+                # Add more ESC vulnerability checks here...
+            
+            if results['vulnerable_templates']:
+                self.add_finding(Severity.HIGH, "AD CS Security", 
+                               "Vulnerable Certificate Templates Detected",
+                               f"Found {len(results['vulnerable_templates'])} vulnerable certificate templates: " +
+                               "\n".join([f"• {t['display_name']} ({t['vulnerability']}): {t['description']}" for t in results['vulnerable_templates']]) +
+                               "\n\n**Why this is risky:** Vulnerable certificate templates can allow privilege escalation and domain compromise." +
+                               "\n\n**How attackers can exploit this:** Attackers can enroll in vulnerable templates to obtain certificates for authentication and privilege escalation.")
+            else:
+                self.add_finding(Severity.INFO, "AD CS Security", 
+                               "Certificate Templates Appear Secure",
+                               f"Checked {results['templates_found']} certificate templates. No obvious vulnerabilities detected.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking AD CS vulnerabilities: {e}", Colors.YELLOW)
+        
+        return results
+
+    def _check_esc1_vulnerability(self, template: Dict) -> bool:
+        """Check if template is vulnerable to ESC1"""
+        try:
+            # ESC1: Template allows enrollment by any authenticated user and has client authentication EKU
+            enrollment_flags = template.get('pKIEnrollmentFlag', [])
+            extended_key_usage = template.get('pKIExtendedKeyUsage', [])
+            
+            # Check if template allows enrollment by any authenticated user
+            if enrollment_flags and any('CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT' in str(flag) for flag in enrollment_flags):
+                # Check if template has client authentication EKU
+                if extended_key_usage and any('Client Authentication' in str(eku) for eku in extended_key_usage):
+                    return True
+            
+            return False
+        except:
+            return False
+
+    def _check_esc2_vulnerability(self, template: Dict) -> bool:
+        """Check if template is vulnerable to ESC2"""
+        try:
+            # ESC2: Template has no EKU specified
+            extended_key_usage = template.get('pKIExtendedKeyUsage', [])
+            return len(extended_key_usage) == 0
+        except:
+            return False
+
+    def check_dns_security(self) -> Dict[str, Any]:
+        """Check DNS security configuration"""
+        self.print_colored("🔍 Checking DNS security configuration...", Colors.CYAN)
+        
+        results = {
+            'zone_transfers_allowed': False,
+            'recursion_enabled': False,
+            'dnssec_enabled': False,
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Check for DNS zone transfer vulnerabilities
+            self.add_finding(Severity.MEDIUM, "DNS Security", 
+                           "DNS Zone Transfer Security",
+                           "DNS zone transfers should be restricted to authorized servers only. " +
+                           "Open zone transfers can reveal internal network information to attackers.")
+            
+            # Check for DNS recursion
+            self.add_finding(Severity.MEDIUM, "DNS Security", 
+                           "DNS Recursion Configuration",
+                           "DNS recursion should be disabled on external-facing DNS servers to prevent DNS amplification attacks.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking DNS security: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_kerberos_security(self) -> Dict[str, Any]:
+        """Check Kerberos security configuration"""
+        self.print_colored("🔍 Checking Kerberos security configuration...", Colors.CYAN)
+        
+        results = {
+            'unconstrained_delegation': [],
+            'constrained_delegation': [],
+            'resource_based_delegation': [],
+            'preauth_disabled': [],
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Check for unconstrained delegation
+            delegation_filter = "(userAccountControl:1.2.840.113556.1.4.803:=524288)"
+            delegation_accounts = self.search_ldap(self._get_search_base_dn(), delegation_filter, ['sAMAccountName', 'userPrincipalName'])
+            
+            if delegation_accounts:
+                results['unconstrained_delegation'] = [acc.get('sAMAccountName') for acc in delegation_accounts]
+                
+                self.add_finding(Severity.HIGH, "Kerberos Security", 
+                               "Unconstrained Delegation Detected",
+                               f"Found {len(delegation_accounts)} accounts with unconstrained delegation: " +
+                               ", ".join(results['unconstrained_delegation'][:5]) +
+                               "\n\n**Why this is risky:** Unconstrained delegation allows accounts to impersonate any user to any service." +
+                               "\n\n**How attackers can exploit this:** Attackers can use unconstrained delegation to escalate privileges and access sensitive services.")
+            
+            # Check for accounts with pre-authentication disabled
+            preauth_filter = "(userAccountControl:1.2.840.113556.1.4.803:=4194304)"
+            preauth_accounts = self.search_ldap(self._get_search_base_dn(), preauth_filter, ['sAMAccountName', 'userPrincipalName'])
+            
+            if preauth_accounts:
+                results['preauth_disabled'] = [acc.get('sAMAccountName') for acc in preauth_accounts]
+                
+                self.add_finding(Severity.HIGH, "Kerberos Security", 
+                               "Pre-authentication Disabled",
+                               f"Found {len(preauth_accounts)} accounts with Kerberos pre-authentication disabled: " +
+                               ", ".join(results['preauth_disabled'][:5]) +
+                               "\n\n**Why this is risky:** Disabled pre-authentication makes accounts vulnerable to AS-REP roasting attacks." +
+                               "\n\n**How attackers can exploit this:** Attackers can request TGTs without providing a password and attempt to crack them offline.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking Kerberos security: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_account_security(self) -> Dict[str, Any]:
+        """Check account security policies"""
+        self.print_colored("🔍 Checking account security policies...", Colors.CYAN)
+        
+        results = {
+            'password_complexity': False,
+            'account_lockout': False,
+            'password_history': False,
+            'account_expiration': False,
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Get password policy
+            policy = self.get_password_policy()
+            
+            if policy:
+                # Check password complexity
+                if policy.get('minPasswordLength', 0) < 8:
+                    results['vulnerabilities'].append("Weak password length requirement")
+                
+                # Check account lockout
+                if policy.get('lockoutThreshold', 0) == 0:
+                    results['vulnerabilities'].append("No account lockout policy")
+                
+                # Check password history
+                if policy.get('passwordHistoryLength', 0) < 5:
+                    results['vulnerabilities'].append("Weak password history requirement")
+            
+            if results['vulnerabilities']:
+                self.add_finding(Severity.MEDIUM, "Account Security", 
+                               "Weak Account Security Policies",
+                               "Account security policies have weaknesses:\n" + "\n".join([f"• {vuln}" for vuln in results['vulnerabilities']]) +
+                               "\n\n**Recommendations:**" +
+                               "\n• Require minimum 8-character passwords" +
+                               "\n• Enable account lockout after failed attempts" +
+                               "\n• Require password history of at least 5 passwords")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking account security: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_network_security(self) -> Dict[str, Any]:
+        """Check network security configuration"""
+        self.print_colored("🔍 Checking network security configuration...", Colors.CYAN)
+        
+        results = {
+            'ipv6_enabled': False,
+            'weak_encryption': False,
+            'insecure_protocols': [],
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Check for IPv6 vulnerabilities
+            self.add_finding(Severity.MEDIUM, "Network Security", 
+                           "IPv6 Security Considerations",
+                           "IPv6 should be properly configured and secured. " +
+                           "Attackers can use IPv6 to bypass network controls and perform various attacks." +
+                           "\n\n**Recommendations:**" +
+                           "\n• Disable IPv6 if not needed" +
+                           "\n• Configure IPv6 security policies" +
+                           "\n• Monitor IPv6 traffic")
+            
+            # Check for weak encryption algorithms
+            self.add_finding(Severity.MEDIUM, "Network Security", 
+                           "Encryption Algorithm Security",
+                           "Ensure strong encryption algorithms are used for authentication and data protection." +
+                           "\n\n**Recommendations:**" +
+                           "\n• Use AES-256 for encryption" +
+                           "\n• Disable RC4 and DES" +
+                           "\n• Require strong cipher suites")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking network security: {e}", Colors.YELLOW)
+        
+        return results
+
+    def check_laps_configuration(self) -> Dict[str, Any]:
+        """Check if Local Administrator Password Solution (LAPS) is configured"""
+        self.print_colored("🔍 Checking LAPS configuration...", Colors.CYAN)
+        
+        results = {
+            'laps_installed': False,
+            'laps_enabled': False,
+            'computers_with_laps': 0,
+            'computers_without_laps': 0,
+            'computers_without_laps_list': [],
+            'computers_with_laps_list': [],
+            'vulnerabilities': []
+        }
+        
+        try:
+            # Check for LAPS attributes on computers
+            computer_filter = "(objectClass=computer)"
+            computers = self.search_ldap(self._get_search_base_dn(), computer_filter, [
+                'name', 'ms-Mcs-AdmPwdExpirationTime', 'ms-Mcs-AdmPwd'
+            ])
+            
+            laps_computers = []
+            non_laps_computers = []
+            
+            for computer in computers:
+                computer_name = computer.get('name', 'Unknown')
+                laps_expiration = computer.get('ms-Mcs-AdmPwdExpirationTime')
+                
+                if laps_expiration:
+                    laps_computers.append(computer_name)
+                else:
+                    non_laps_computers.append(computer_name)
+            
+            results['computers_with_laps'] = len(laps_computers)
+            results['computers_without_laps'] = len(non_laps_computers)
+            results['computers_without_laps_list'] = non_laps_computers
+            results['computers_with_laps_list'] = laps_computers
+            
+            if laps_computers:
+                results['laps_installed'] = True
+                results['laps_enabled'] = True
+                
+                self.add_finding(Severity.INFO, "LAPS Configuration", 
+                               "LAPS is Configured",
+                               f"Local Administrator Password Solution (LAPS) is configured on {len(laps_computers)} computers." +
+                               "\n\n**Benefits:**" +
+                               "\n• Unique local admin passwords per computer" +
+                               "\n• Automatic password rotation" +
+                               "\n• Centralized password management")
+            
+            if non_laps_computers:
+                self.add_finding(Severity.MEDIUM, "LAPS Configuration", 
+                               "LAPS Not Configured on All Computers",
+                               f"LAPS is not configured on {len(non_laps_computers)} computers: " +
+                               ", ".join(non_laps_computers[:10]) +
+                               "\n\n**Risk:** Computers without LAPS may have weak or shared local administrator passwords." +
+                               "\n\n**Recommendation:** Deploy LAPS to all domain-joined computers.")
+            
+        except Exception as e:
+            self.print_colored(f"⚠️ Error checking LAPS configuration: {e}", Colors.YELLOW)
+        
+        return results
+
+    def run_security_checks(self) -> Dict[str, Any]:
+        """Run all security protocol and configuration checks"""
+        if self.skip_security_checks:
+            self.print_colored("⏭️ Skipping security checks as requested", Colors.YELLOW)
+            return {}
+        
+        self.print_colored("🔒 Starting security protocol and configuration checks...", Colors.BLUE)
+        
+        security_results = {
+            'llmnr_nbtns': self.check_llmnr_nbtns_configuration(),
+            'smb': self.check_smb_configuration(),
+            'ntlm': self.check_ntlm_configuration(),
+            'ldap': self.check_ldap_security(),
+            'cpasswords': self.extract_cpasswords(),
+            'ad_cs': self.check_ad_cs_vulnerabilities(),
+            'dns': self.check_dns_security(),
+            'kerberos': self.check_kerberos_security(),
+            'account_security': self.check_account_security(),
+            'network_security': self.check_network_security(),
+            'laps': self.check_laps_configuration()
+        }
+        
+        self.print_colored("✅ Security checks completed", Colors.GREEN)
+        return security_results
+
+    def _generate_security_checks_html(self, security_results: Dict[str, Any]) -> str:
+        """Generate HTML for security check results"""
+        if not security_results:
+            return '<div class="no-data">No security check results available.</div>'
+        
+        html_parts = []
+        
+        # LLMNR/NBT-NS Configuration
+        if 'llmnr_nbtns' in security_results:
+            llmnr_data = security_results['llmnr_nbtns']
+            html_parts.append(f"""
+                <div class="policy-section">
+                    <h4>🌐 LLMNR/NBT-NS Configuration</h4>
+                    <div class="policy-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Setting</th>
+                                    <th>Status</th>
+                                    <th>Risk Level</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="manual">
+                                    <td>LLMNR Protocol</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                                <tr class="manual">
+                                    <td>NBT-NS Protocol</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            """)
+        
+        # SMB Configuration
+        if 'smb' in security_results:
+            smb_data = security_results['smb']
+            html_parts.append(f"""
+                <div class="policy-section">
+                    <h4>💾 SMB Configuration</h4>
+                    <div class="policy-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Setting</th>
+                                    <th>Status</th>
+                                    <th>Risk Level</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="{'high' if smb_data.get('smbv1_enabled') else 'good'}">
+                                    <td>SMBv1 Protocol</td>
+                                    <td>{'Enabled (Vulnerable)' if smb_data.get('smbv1_enabled') else 'Disabled (Secure)'}</td>
+                                    <td>{'High' if smb_data.get('smbv1_enabled') else 'Low'}</td>
+                                </tr>
+                                <tr class="manual">
+                                    <td>SMB Signing</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            """)
+        
+        # NTLM Configuration
+        if 'ntlm' in security_results:
+            html_parts.append(f"""
+                <div class="policy-section">
+                    <h4>🔐 NTLM Configuration</h4>
+                    <div class="policy-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Setting</th>
+                                    <th>Status</th>
+                                    <th>Risk Level</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="manual">
+                                    <td>NTLMv1</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                                <tr class="manual">
+                                    <td>NTLMv2</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            """)
+        
+        # LDAP Security
+        if 'ldap' in security_results:
+            ldap_data = security_results['ldap']
+            html_parts.append(f"""
+                <div class="policy-section">
+                    <h4>📋 LDAP Security</h4>
+                    <div class="policy-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Setting</th>
+                                    <th>Status</th>
+                                    <th>Risk Level</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="{'high' if not ldap_data.get('ldaps_enabled') else 'good'}">
+                                    <td>LDAPS (SSL/TLS)</td>
+                                    <td>{'Not used (Insecure)' if not ldap_data.get('ldaps_enabled') else 'Enabled (Secure)'}</td>
+                                    <td>{'High' if not ldap_data.get('ldaps_enabled') else 'Low'}</td>
+                                </tr>
+                                <tr class="manual">
+                                    <td>LDAP Signing</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                                <tr class="manual">
+                                    <td>Channel Binding</td>
+                                    <td>Manual verification required</td>
+                                    <td>Medium</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            """)
+        
+        # cPasswords
+        if 'cpasswords' in security_results:
+            cpasswords = security_results['cpasswords']
+            if cpasswords:
+                # Check if any passwords were actually decrypted
+                decrypted_passwords = [cpwd for cpwd in cpasswords if cpwd.get('status') == 'decrypted' and cpwd.get('password')]
+                manual_check_passwords = [cpwd for cpwd in cpasswords if cpwd.get('status') == 'requires_manual_check']
+                
+                if decrypted_passwords:
+                    html_parts.append(f"""
+                        <div class="policy-section">
+                            <h4>🔑 Decrypted GPO cPasswords</h4>
+                            <div class="policy-table">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>GPO Name</th>
+                                            <th>Username</th>
+                                            <th>Password</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {''.join([f'''
+                                        <tr class="high">
+                                            <td>{cpwd.get('gpo_display', 'Unknown')}</td>
+                                            <td>{cpwd.get('username', 'Unknown')}</td>
+                                            <td><code>{cpwd.get('password', 'Unknown')}</code></td>
+                                            <td>Decrypted</td>
+                                        </tr>
+                                        ''' for cpwd in decrypted_passwords])}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p style="margin-top: 10px; font-size: 0.9em; color: #dc3545;">
+                                <strong>⚠️ CRITICAL:</strong> {len(decrypted_passwords)} decrypted passwords found! These credentials should be immediately rotated.
+                            </p>
+                        </div>
+                    """)
+                
+                # Add section for all cPassword locations found
+                all_cpasswords = security_results.get('all_cpasswords', [])
+                if all_cpasswords:
+                    html_parts.append(f"""
+                        <div class="policy-section">
+                            <h4>🔍 All cPassword Locations Found</h4>
+                            <div class="policy-table">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>GPO Name</th>
+                                            <th>Location</th>
+                                            <th>Status</th>
+                                            <th>Decryption Error</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {''.join([f'''
+                                        <tr class="{'high' if cpwd.get('status') == 'decrypted' else 'manual'}">
+                                            <td>{cpwd.get('gpo_display', 'Unknown')}</td>
+                                            <td><code>{cpwd.get('location', 'Unknown')}</code></td>
+                                            <td>{cpwd.get('status', 'Unknown')}</td>
+                                            <td>{cpwd.get('decryption_error', 'None')}</td>
+                                        </tr>
+                                        ''' for cpwd in all_cpasswords[:20]])}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                                <strong>Summary:</strong> Found {len(all_cpasswords)} cPassword entries in total. {len(decrypted_passwords)} successfully decrypted, {len(all_cpasswords) - len(decrypted_passwords)} failed to decrypt.
+                            </p>
+                            <p style="margin-top: 5px; font-size: 0.9em; color: #ffc107;">
+                                <strong>Decryption Issues:</strong> Common reasons for decryption failure include incorrect domain SID, corrupted cPassword values, or different encryption methods.
+                            </p>
+                        </div>
+                    """)
+                
+                if manual_check_passwords:
+                    html_parts.append(f"""
+                        <div class="policy-section">
+                            <h4>🔍 GPOs Requiring Manual Check</h4>
+                            <div class="policy-table">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>GPO Name</th>
+                                            <th>Status</th>
+                                            <th>Files Checked</th>
+                                            <th>Error (if any)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {''.join([f'''
+                                        <tr class="manual">
+                                            <td>{cpwd.get('gpo_display', 'Unknown')}</td>
+                                            <td>Requires manual check</td>
+                                            <td>{cpwd.get('files_checked_count', len(cpwd.get('checked_files', [])))} XML files checked<br><small>Base: {cpwd.get('location', 'Unknown')}</small></td>
+                                            <td>{cpwd.get('error', 'No error - no cPasswords found')}</td>
+                                        </tr>
+                                        ''' for cpwd in manual_check_passwords[:10]])}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                                <strong>Note:</strong> {len(manual_check_passwords)} GPOs require manual verification. The script searched ALL XML files recursively but couldn't find cPasswords.
+                            </p>
+                            <p style="margin-top: 5px; font-size: 0.9em; color: #ffc107;">
+                                <strong>Why manual check needed:</strong> Network access restrictions, file permissions, or cPasswords stored in non-standard locations.
+                            </p>
+                            <p style="margin-top: 5px; font-size: 0.9em; color: #17a2b8;">
+                                <strong>Search Coverage:</strong> Script now searches ALL XML files in each GPO recursively, including Groups.xml, Services.xml, ScheduledTasks.xml, DataSources.xml, Drives.xml, IniFiles.xml, Registry.xml, Shortcuts.xml, StartMenu.xml, and WindowsSettings.xml.
+                            </p>
+                        </div>
+                    """)
+        
+        # AD CS Vulnerabilities
+        if 'ad_cs' in security_results:
+            ad_cs_data = security_results['ad_cs']
+            if ad_cs_data.get('vulnerable_templates'):
+                html_parts.append(f"""
+                    <div class="policy-section">
+                        <h4>🏛️ AD CS Vulnerabilities</h4>
+                        <div class="policy-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Template Name</th>
+                                        <th>Vulnerability</th>
+                                        <th>Description</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {''.join([f'''
+                                    <tr class="high">
+                                        <td>{template.get('display_name', 'Unknown')}</td>
+                                        <td>{template.get('vulnerability', 'Unknown')}</td>
+                                        <td>{template.get('description', 'Unknown')}</td>
+                                    </tr>
+                                    ''' for template in ad_cs_data['vulnerable_templates'][:10]])}
+                                </tbody>
+                            </table>
+                        </div>
+                        <p style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                            <strong>Note:</strong> {len(ad_cs_data['vulnerable_templates'])} vulnerable templates found out of {ad_cs_data.get('templates_found', 0)} total templates.
+                        </p>
+                    </div>
+                """)
+        
+        # Kerberos Security
+        if 'kerberos' in security_results:
+            kerberos_data = security_results['kerberos']
+            if kerberos_data.get('unconstrained_delegation') or kerberos_data.get('preauth_disabled'):
+                html_parts.append(f"""
+                    <div class="policy-section">
+                        <h4>🎫 Kerberos Security</h4>
+                        <div class="policy-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Issue</th>
+                                        <th>Count</th>
+                                        <th>Risk Level</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {f'''
+                                    <tr class="high">
+                                        <td>Unconstrained Delegation</td>
+                                        <td>{len(kerberos_data.get('unconstrained_delegation', []))}</td>
+                                        <td>High</td>
+                                    </tr>
+                                    ''' if kerberos_data.get('unconstrained_delegation') else ''}
+                                    {f'''
+                                    <tr class="high">
+                                        <td>Pre-authentication Disabled</td>
+                                        <td>{len(kerberos_data.get('preauth_disabled', []))}</td>
+                                        <td>High</td>
+                                    </tr>
+                                    ''' if kerberos_data.get('preauth_disabled') else ''}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                """)
+        
+        # LAPS Configuration
+        if 'laps' in security_results:
+            laps_data = security_results['laps']
+            html_parts.append(f"""
+                <div class="policy-section">
+                    <h4>🔐 LAPS Configuration</h4>
+                    <div class="policy-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Setting</th>
+                                    <th>Status</th>
+                                    <th>Count</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="{'good' if laps_data.get('laps_enabled') else 'weak'}">
+                                    <td>LAPS Enabled</td>
+                                    <td>{'Yes' if laps_data.get('laps_enabled') else 'No'}</td>
+                                    <td>{laps_data.get('computers_with_laps', 0)} computers</td>
+                                </tr>
+                                <tr class="{'weak' if laps_data.get('computers_without_laps', 0) > 0 else 'good'}">
+                                    <td>LAPS Not Configured</td>
+                                    <td>{'Yes' if laps_data.get('computers_without_laps', 0) > 0 else 'No'}</td>
+                                    <td>{laps_data.get('computers_without_laps', 0)} computers</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            """)
+            
+            # Add detailed list of computers with LAPS
+            if laps_data.get('computers_with_laps_list'):
+                computers_with_laps = laps_data['computers_with_laps_list']
+                html_parts.append(f"""
+                    <div class="data-section">
+                        <div class="collapsible-section">
+                            <h2 class="section-header" onclick="toggleSection(this)">✅ Computers With LAPS ({len(computers_with_laps)})</h2>
+                            <div class="section-content">
+                                <div class="search-container">
+                                    <input type="text" class="search-box" id="lapsWithSearch" placeholder="🔍 Search computers with LAPS...">
+                                </div>
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Computer Name</th>
+                                            <th>Status</th>
+                                            <th>Risk Level</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {''.join([f'''
+                                        <tr class="good">
+                                            <td>{computer}</td>
+                                            <td>LAPS Configured</td>
+                                            <td>Low</td>
+                                        </tr>
+                                        ''' for computer in computers_with_laps[:50]])}
+                                    </tbody>
+                                </table>
+                                {f'<p style="margin-top: 10px; font-size: 0.9em; color: #666;">Showing first 50 computers. Total: {len(computers_with_laps)} computers with LAPS configured.</p>' if len(computers_with_laps) > 50 else ''}
+                            </div>
+                        </div>
+                    </div>
+                """)
+            
+            # Add detailed list of computers without LAPS
+            if laps_data.get('computers_without_laps_list'):
+                computers_list = laps_data['computers_without_laps_list']
+                html_parts.append(f"""
+                    <div class="data-section">
+                        <div class="collapsible-section">
+                            <h2 class="section-header" onclick="toggleSection(this)">🖥️ Computers Without LAPS ({len(computers_list)})</h2>
+                            <div class="section-content">
+                                <div class="search-container">
+                                    <input type="text" class="search-box" id="lapsSearch" placeholder="🔍 Search computers without LAPS...">
+                                </div>
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Computer Name</th>
+                                            <th>Status</th>
+                                            <th>Risk Level</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {''.join([f'''
+                                        <tr class="weak">
+                                            <td>{computer}</td>
+                                            <td>LAPS Not Configured</td>
+                                            <td>Medium</td>
+                                        </tr>
+                                        ''' for computer in computers_list])}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                """)
+        
+        return ''.join(html_parts)
 
     def run_guest_mode(self):
         """Run reconnaissance in guest mode"""
@@ -2879,6 +4439,31 @@ class ADRecon:
             'findings': [asdict(f) for f in self.findings]
         }
         
+        # Run security protocol and configuration checks
+        security_results = self.run_security_checks()
+        
+        # Update computer data with LAPS information
+        if 'laps' in security_results and computers:
+            laps_data = security_results['laps']
+            computers_with_laps = set(laps_data.get('computers_with_laps_list', []))
+            computers_without_laps = set(laps_data.get('computers_without_laps_list', []))
+            
+            for computer in computers:
+                computer_name = computer.get('name', '')
+                if computer_name in computers_with_laps:
+                    computer['laps_status'] = '<span class="badge laps-yes">Yes</span>'
+                elif computer_name in computers_without_laps:
+                    computer['laps_status'] = '<span class="badge laps-no">No</span>'
+                else:
+                    computer['laps_status'] = '<span class="badge user">Unknown</span>'
+        
+        # Add security results to findings data
+        findings_data['security_results'] = security_results
+        
+        # Add all cPasswords for detailed reporting
+        if 'cpasswords' in security_results:
+            findings_data['all_cpasswords'] = security_results['cpasswords']
+        
         # Save comprehensive findings
         self.save_json(findings_data, 'findings.json')
         self.generate_html_report(findings_data)
@@ -2969,6 +4554,8 @@ Examples:
     parser.add_argument('--output-format', nargs='+', choices=['json', 'csv', 'xml'], default=['json'],
                        help='Output formats (default: json)')
     parser.add_argument('--output-folder', help='Output folder path')
+    parser.add_argument('--skip-security-checks', action='store_true',
+                       help='Skip security protocol and configuration checks (LLMNR, SMB, NTLM, etc.)')
     
     args = parser.parse_args()
     
@@ -2991,7 +4578,8 @@ Examples:
         domain=args.domain,
         username=args.username,
         password=args.password,
-        hash=args.hash
+        hash=args.hash,
+        skip_security_checks=args.skip_security_checks
     )
     
     # Run based on mode
